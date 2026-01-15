@@ -10,8 +10,9 @@
     
     <script>
         // --- [重要設定區] ---
+        // 系統會自動注入 API Key，請保持為空字串
+        const API_KEY = ""; 
         const CLIENT_ID = '107140118174-mm7cbcacd1evj72plq2b9pm6f1gf9fk4.apps.googleusercontent.com'; 
-        const API_KEY = ""; // 由環境注入
         const SCOPES = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly';
         // ------------------
 
@@ -23,21 +24,12 @@
         let currentDayData = {
             date: "",
             fileId: null,
-            meals: [], // 進食流程清單
+            meals: [], 
             targets: { cal: 2000, pro: 120, carb: 150, fat: 60 },
             contexts: { plan: "", note: "", history: "", meal_file_text: "" }
         };
 
-        // 民國日期轉換
-        function getROCFileName(dateStr) {
-            const d = new Date(dateStr);
-            const rocYear = d.getFullYear() - 1911;
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const day = String(d.getDate()).padStart(2, '0');
-            return `${rocYear}年${month}月${day}日 飲食控制紀錄`;
-        }
-
-        // 初始化 Google API
+        // --- Google API 載入控制 ---
         function gapiLoaded() {
             gapi.load('client:picker', async () => {
                 try {
@@ -45,7 +37,8 @@
                         apiKey: API_KEY,
                         discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
                     });
-                } catch (e) { console.error("GAPI Error:", e); }
+                    console.log("GAPI 載入成功");
+                } catch (e) { console.error("GAPI 初始化失敗:", e); }
             });
         }
 
@@ -56,22 +49,43 @@
                     scope: SCOPES,
                     ux_mode: 'popup', 
                     callback: (resp) => {
-                        if (resp.error) return alert("授權失敗");
+                        if (resp.error) {
+                            console.error("授權回傳錯誤:", resp);
+                            return;
+                        }
                         accessToken = resp.access_token;
                         document.getElementById('auth-btn').innerHTML = `<i class="fas fa-check-circle"></i> 雲端已連線`;
-                        document.getElementById('auth-btn').classList.replace('bg-blue-600', 'bg-emerald-600');
+                        document.getElementById('auth-btn').className = "bg-emerald-600 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-lg";
                         loadDailyData();
                     },
                 });
-            } catch (e) { console.error("GIS Error:", e); }
+                console.log("GIS 載入成功");
+            } catch (e) { console.error("GIS 初始化失敗:", e); }
         }
 
-        function handleAuthClick() {
-            if (!tokenClient) return alert("系統初始化中...");
+        async function handleAuthClick() {
+            if (!tokenClient) {
+                // 如果因為網路延遲未載入，嘗試手動初始化一次
+                if (typeof google !== 'undefined') {
+                    gisLoaded();
+                    if (!tokenClient) return renderThinking("Google 授權套件載入失敗，請檢查網路後重新整理頁面。");
+                } else {
+                    return alert("系統正在從 Google 伺服器載入必要組件，請稍候再試...");
+                }
+            }
             tokenClient.requestAccessToken({ prompt: 'select_account' });
         }
 
-        // 雲端數據同步 (讀取民國格式檔案並解析隱藏數據)
+        // --- 核心邏輯：民國日期轉換 ---
+        function getROCFileName(dateStr) {
+            const d = new Date(dateStr);
+            const rocYear = d.getFullYear() - 1911;
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${rocYear}年${month}月${day}日 飲食控制紀錄`;
+        }
+
+        // 雲端數據同步
         async function loadDailyData() {
             const dateStr = document.getElementById('target-date').value;
             if (!dateStr) return;
@@ -93,8 +107,10 @@
                     const rawContent = content.body;
                     const dataMatch = rawContent.match(/\[DATA:(.*)\]/);
                     if (dataMatch) {
-                        const savedState = JSON.parse(dataMatch[1]);
-                        currentDayData.meals = savedState.meals || [];
+                        try {
+                            const savedState = JSON.parse(dataMatch[1]);
+                            currentDayData.meals = savedState.meals || [];
+                        } catch(e) { currentDayData.meals = []; }
                     } else {
                         currentDayData.meals = [];
                     }
@@ -103,13 +119,13 @@
                     currentDayData.meals = [];
                 }
                 updateUI();
-                renderThinking(`同步完成！已載入 ${currentDayData.meals.length} 項進食明細。`);
+                renderThinking(`同步完成！目前已有 ${currentDayData.meals.length} 項紀錄。`);
             } catch (err) { 
-                console.error(err); 
+                console.error("讀取雲端失敗:", err);
+                renderThinking("無法讀取雲端檔案，請確認您的 Google 帳號擁有足夠權限。");
             } finally { showLoading(false); }
         }
 
-        // 儲存為民國格式 (進食流程表格 + 小計 + 隱藏 JSON)
         async function saveDailyData() {
             if (!accessToken) return;
             const fileName = getROCFileName(currentDayData.date);
@@ -119,16 +135,16 @@
             }, { cal: 0, pro: 0, carb: 0, fat: 0 });
 
             let fileBody = `【${fileName}】\n\n`;
-            fileBody += `進食流程：\n`;
-            fileBody += `時間\t食物名稱\t熱量(kcal)\t碳水(g)\t蛋白(g)\t脂肪(g)\n`;
+            fileBody += `進食流程表格：\n`;
+            fileBody += `時間\t食物名稱\t熱量\t碳水\t蛋白\t脂肪\n`;
             fileBody += `------------------------------------------------------------\n`;
             currentDayData.meals.forEach(m => {
-                fileBody += `${m.time}\t${m.name}\t${m.cal}\t${m.carb}\t${m.pro}\t${m.fat}\n`;
+                fileBody += `${m.time}\t${m.name}\t${Math.round(m.cal)}k\t${Math.round(m.carb)}g\t${Math.round(m.pro)}g\t${Math.round(m.fat)}g\n`;
             });
             fileBody += `------------------------------------------------------------\n`;
-            fileBody += `目前小計：\n`;
-            fileBody += `熱量：${Math.round(totals.cal)} kcal\t碳水：${Math.round(totals.carb)} g\t蛋白：${Math.round(totals.pro)} g\t脂肪：${Math.round(totals.fat)} g\n\n`;
-            fileBody += `最後更新時間：${new Date().toLocaleString('zh-TW')}\n`;
+            fileBody += `今日累積小計：\n`;
+            fileBody += `熱量：${Math.round(totals.cal)} kcal | 碳水：${Math.round(totals.carb)} g | 蛋白：${Math.round(totals.pro)} g | 脂肪：${Math.round(totals.fat)} g\n\n`;
+            fileBody += `最後同步：${new Date().toLocaleString('zh-TW')}\n`;
             fileBody += `\n[DATA:${JSON.stringify({ meals: currentDayData.meals })}]`;
 
             try {
@@ -147,34 +163,95 @@
                     const resJson = await resp.json();
                     currentDayData.fileId = resJson.id;
                 }
-                renderThinking(`雲端同步更新成功。`);
-            } catch (err) { console.error(err); }
+            } catch (err) { console.error("儲存失敗:", err); }
         }
 
-        // --- 檔案匯入整合 (本地 + 雲端) ---
-
-        function triggerLocalFile(type) {
-            const input = document.createElement('input');
-            input.type = 'file'; input.multiple = true;
-            input.accept = '.txt,.html,.htm,.pdf,.doc,.docx';
-            input.onchange = (e) => handleLocalFiles(e.target.files, type);
-            input.click();
-        }
-
-        async function handleLocalFiles(files, type) {
-            showLoading(true, "讀取多個本地檔案...");
-            let totalContent = "";
-            let fileNames = [];
-            for (const file of files) {
-                fileNames.push(file.name);
-                const content = await readFileAsText(file);
-                totalContent += `\n--- 本地檔案：${file.name} ---\n${content}\n`;
+        // --- AI 調用與重試邏輯 ---
+        async function fetchWithRetry(url, options, retries = 5, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) return await response.json();
+                    if (response.status !== 429 && response.status < 500) break;
+                } catch (e) {
+                    if (i === retries - 1) throw e;
+                }
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2; // 指數退避
             }
-            currentDayData.contexts[type] = (currentDayData.contexts[type] || "") + totalContent;
-            updateContextBadge(type, `本地 ${files.length} 個檔案`, fileNames.join(', '));
-            showLoading(false);
+            throw new Error("AI 伺服器忙碌中，請稍後再試。");
         }
 
+        async function processIntake() {
+            const foodImgFile = document.getElementById('food-img').files[0];
+            const mealText = document.getElementById('meal-text-input').value;
+            const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            if (!foodImgFile && !mealText) return alert("請至少提供食物照片或描述文字內容。");
+
+            showLoading(true, "Gemini 3.0 深度分析中...");
+            
+            try {
+                const systemPrompt = `你是一位專業營養師。請分析進食內容。
+                背景脈絡：${JSON.stringify(currentDayData.contexts)}
+                今日已攝取：${JSON.stringify(currentDayData.meals)}
+                請根據 Mounjaro 藥效期建議（優先蛋白、控制碳水）。
+                回傳 JSON：{"items": [{"name": "食物名", "cal": 數值, "pro": 數值, "carb": 數值, "fat": 數值}], "advice": "深度分析文字"}`;
+
+                const userPrompt = mealText || "請辨識圖中食物並計算熱量與營養素。";
+                
+                const contents = [{ 
+                    parts: [{ text: userPrompt }] 
+                }];
+
+                if (foodImgFile) {
+                    const base64 = await toBase64(foodImgFile);
+                    contents[0].parts.push({ 
+                        inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } 
+                    });
+                }
+
+                const payload = {
+                    contents: contents,
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    generationConfig: { responseMimeType: "application/json" }
+                };
+
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+                const data = await fetchWithRetry(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                
+                try {
+                    const result = JSON.parse(rawText);
+                    result.items.forEach(item => {
+                        currentDayData.meals.push({
+                            time: nowTime,
+                            name: item.name,
+                            cal: item.cal || 0,
+                            pro: item.pro || 0,
+                            carb: item.carb || 0,
+                            fat: item.fat || 0
+                        });
+                    });
+                    updateUI();
+                    renderThinking(`<b>AI 專家分析回饋：</b><br>${result.advice}`);
+                    await saveDailyData();
+                } catch (jsonErr) {
+                    renderThinking(`<b>AI 原始分析：</b><br>${rawText}`);
+                }
+                resetInputs();
+            } catch (e) {
+                console.error("AI 分析出錯:", e);
+                renderThinking(`<span class="text-red-400">分析失敗：${e.message}</span>`);
+            } finally { showLoading(false); }
+        }
+
+        // --- 檔案選擇器整合 ---
         function createPicker(type) {
             if (!accessToken) return alert("請先連結 Google 帳號");
             const mimes = ['application/vnd.google-apps.document','text/plain','application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/msword'].join(',');
@@ -189,106 +266,47 @@
 
         async function pickerCallback(data, type) {
             if (data.action === google.picker.Action.PICKED) {
-                showLoading(true, "匯入多個雲端檔案...");
+                showLoading(true, "讀取雲端內容...");
                 try {
                     let totalContent = "";
-                    let fileNames = [];
                     for (const doc of data.docs) {
-                        fileNames.push(doc.name);
                         let content = "";
                         if (doc.mimeType === 'application/vnd.google-apps.document') {
                             const exportUrl = `https://www.googleapis.com/drive/v3/files/${doc.id}/export?mimeType=text/plain`;
-                            const response = await fetch(exportUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-                            content = await response.text();
+                            const resp = await fetch(exportUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+                            content = await resp.text();
                         } else {
                             const getUrl = `https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media`;
-                            const response = await fetch(getUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-                            content = await response.text();
+                            const resp = await fetch(getUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+                            content = await resp.text();
                         }
-                        totalContent += `\n--- 雲端檔案：${doc.name} ---\n${content}\n`;
+                        totalContent += `\n[雲端檔案: ${doc.name}]\n${content}\n`;
                     }
                     currentDayData.contexts[type] = (currentDayData.contexts[type] || "") + totalContent;
-                    updateContextBadge(type, `雲端 ${data.docs.length} 個檔案`, fileNames.join(', '));
+                    updateContextBadge(type, `${data.docs.length} 個雲端檔案`);
                 } catch (e) { console.error(e); }
                 finally { showLoading(false); }
             }
         }
 
-        function updateContextBadge(type, title, detail) {
-            const container = document.getElementById('selected-contexts');
-            const badge = document.createElement('div');
-            badge.className = "bg-slate-800 p-2 rounded-lg text-[10px] mt-1 text-blue-400 border border-slate-700";
-            badge.innerHTML = `<div class="flex justify-between font-bold"><span>${title}</span><i class="fas fa-check text-emerald-400"></i></div><div class="text-[9px] opacity-60 truncate">${detail}</div>`;
-            container.appendChild(badge);
+        function triggerLocalFile(type) {
+            const input = document.createElement('input');
+            input.type = 'file'; input.multiple = true;
+            input.onchange = async (e) => {
+                showLoading(true, "處理本地檔案...");
+                let total = "";
+                for (const file of e.target.files) {
+                    const text = await readFileAsText(file);
+                    total += `\n[本地檔案: ${file.name}]\n${text}\n`;
+                }
+                currentDayData.contexts[type] = (currentDayData.contexts[type] || "") + total;
+                updateContextBadge(type, `${e.target.files.length} 個本地檔案`);
+                showLoading(false);
+            };
+            input.click();
         }
 
-        function readFileAsText(file) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                if (file.type === "text/plain" || file.type === "text/html") {
-                    reader.onload = (e) => resolve(e.target.result);
-                    reader.readAsText(file);
-                } else {
-                    reader.onload = () => resolve(`[非純文字檔案附件: ${file.name}]`);
-                    reader.readAsDataURL(file);
-                }
-            });
-        }
-
-        // --- AI 進食分析與紀錄邏輯 ---
-        async function processIntake() {
-            const foodImg = document.getElementById('food-img').files[0];
-            const mealText = document.getElementById('meal-text-input').value;
-            const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            
-            showLoading(true, "AI 正在分析並建立進食流程表格...");
-            
-            try {
-                const prompt = `你是一位專業營養師。請分析本次攝取內容。
-                計畫與歷史背景：${JSON.stringify(currentDayData.contexts)}
-                今日已有紀錄：${JSON.stringify(currentDayData.meals)}
-                使用者文字描述：${mealText}
-                請給出每一項食物的明細，並以專業角度分析對目前代謝狀態的影響。
-                回傳 JSON 格式：{"items": [{"name": "食物名", "cal": 數值, "pro": 數值, "carb": 數值, "fat": 數值}], "advice": "針對 Mounjaro 與代謝的詳細文字建議"}`;
-
-                const parts = [{ text: prompt }];
-                if (foodImg) {
-                    const base64 = await toBase64(foodImg);
-                    parts.push({ inlineData: { mimeType: "image/jpeg", data: base64.split(',')[1] } });
-                }
-
-                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: parts }] })
-                });
-                const data = await response.json();
-                const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-                const jsonMatch = text.match(/\{.*\}/s);
-                
-                if (jsonMatch) {
-                    const result = JSON.parse(jsonMatch[0]);
-                    // 增量 Push 新食物到清單
-                    result.items.forEach(item => {
-                        currentDayData.meals.push({
-                            time: nowTime,
-                            name: item.name,
-                            cal: item.cal || 0,
-                            pro: item.pro || 0,
-                            carb: item.carb || 0,
-                            fat: item.fat || 0
-                        });
-                    });
-                    updateUI();
-                    renderThinking(`<b>AI 深度建議：</b><br>${result.advice}`);
-                    await saveDailyData(); // 當日第N次更新，直接在雲端續寫
-                } else {
-                    renderThinking(text);
-                }
-                resetInputs();
-            } catch (e) { console.error(e); renderThinking("連線失敗，請檢查網絡。"); }
-            finally { showLoading(false); }
-        }
-
+        // --- UI 工具 ---
         function updateUI() {
             const totals = currentDayData.meals.reduce((acc, m) => {
                 acc.cal += m.cal; acc.pro += m.pro; acc.carb += m.carb; acc.fat += m.fat;
@@ -304,16 +322,14 @@
             document.getElementById('carb-bar').style.width = `${Math.min(100, (totals.carb/currentDayData.targets.carb)*100)}%`;
             document.getElementById('fat-bar').style.width = `${Math.min(100, (totals.fat/currentDayData.targets.fat)*100)}%`;
 
-            // 更新表格顯示
             const listDiv = document.getElementById('meals-list');
             listDiv.innerHTML = currentDayData.meals.map(m => `
                 <div class="flex justify-between border-b border-slate-800 py-2 text-[10px]">
                     <span class="text-slate-500">${m.time}</span>
                     <span class="w-32 truncate text-slate-300 font-bold">${m.name}</span>
-                    <span class="text-emerald-400">${Math.round(m.cal)}k</span>
-                    <span class="text-orange-400">${Math.round(m.fat)}f</span>
+                    <span class="text-emerald-400 font-mono">${Math.round(m.cal)}k</span>
                 </div>
-            `).join('') || '<div class="text-center text-slate-600 py-4 italic">尚無進食流程數據</div>';
+            `).join('') || '<div class="text-center text-slate-600 py-4 italic">目前無進食流程數據</div>';
 
             const ctx = document.getElementById('calChart').getContext('2d');
             if (calChart) calChart.destroy();
@@ -324,11 +340,25 @@
             });
         }
 
-        function renderThinking(text) {
+        function updateContextBadge(type, text) {
+            const container = document.getElementById('selected-contexts');
             const div = document.createElement('div');
-            div.className = "p-4 bg-slate-800/60 border border-slate-700 rounded-xl mb-4 text-slate-300 animate-fade-in text-[11px] leading-relaxed";
+            div.className = "bg-blue-900/30 p-2 rounded-lg text-[10px] mt-1 text-blue-300 border border-blue-500/20 flex justify-between";
+            div.innerHTML = `<span><i class="fas fa-file-alt mr-1"></i> ${text}</span> <i class="fas fa-check"></i>`;
+            container.appendChild(div);
+        }
+
+        function renderThinking(text) {
+            const aiContent = document.getElementById('ai-content');
+            const div = document.createElement('div');
+            div.className = "p-4 bg-slate-800/60 border border-slate-700 rounded-xl mb-4 text-slate-300 animate-fade-in text-[11px] leading-relaxed shadow-sm";
             div.innerHTML = text;
-            document.getElementById('ai-content').prepend(div);
+            aiContent.prepend(div);
+        }
+
+        function showLoading(show, text = "") {
+            document.getElementById('loading-overlay').classList.toggle('hidden', !show);
+            document.getElementById('loading-text').textContent = text;
         }
 
         function resetInputs() {
@@ -338,16 +368,19 @@
             document.getElementById('upload-placeholder').classList.remove('hidden');
         }
 
-        function showLoading(show, text = "") {
-            document.getElementById('loading-overlay').classList.toggle('hidden', !show);
-            document.getElementById('loading-text').textContent = text;
-        }
-
         function toBase64(file) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
                 reader.onload = () => resolve(reader.result);
+            });
+        }
+
+        function readFileAsText(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.readAsText(file);
             });
         }
 
@@ -367,6 +400,8 @@
             };
         });
     </script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
@@ -381,8 +416,8 @@
     <div class="max-w-6xl mx-auto space-y-6">
         <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 glass-card p-6">
             <div>
-                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400 font-serif">HealthMind Dashboard</h1>
-                <p class="text-slate-400 text-[10px] mt-1 uppercase tracking-widest">民國日期格式 · 增量同步存取模式</p>
+                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400">HealthMind Dashboard</h1>
+                <p class="text-slate-400 text-[10px] mt-1 uppercase tracking-widest">Mounjaro 管理 · 民國格式增量存取</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <input type="date" id="target-date" class="bg-slate-800 border-slate-700 text-white p-2 rounded-lg text-sm" onchange="if(accessToken) loadDailyData()">
@@ -394,86 +429,77 @@
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div class="lg:col-span-1 space-y-6">
-                <!-- 脈絡整合區 (計畫/歷史) -->
+                <!-- 脈絡整合區 -->
                 <section class="glass-card p-6">
-                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2"><i class="fas fa-layer-group text-cyan-400"></i> 背景脈絡 (雲端+本地)</h2>
+                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2"><i class="fas fa-history text-cyan-400"></i> 背景脈絡與流程</h2>
                     <div class="space-y-4">
                         <div class="space-y-1">
-                            <span class="text-[10px] text-slate-500 font-bold uppercase">飲食計畫 / 以前紀錄</span>
+                            <span class="text-[10px] text-slate-500 font-bold uppercase">匯入飲食計畫/筆記</span>
                             <div class="grid grid-cols-2 gap-2">
                                 <button onclick="createPicker('plan')" class="bg-slate-800 hover:bg-slate-700 p-2 rounded text-[10px] border border-slate-700 transition">雲端多選</button>
                                 <button onclick="triggerLocalFile('plan')" class="bg-slate-800 hover:bg-slate-700 p-2 rounded text-[10px] border border-slate-700 transition">本地上傳</button>
                             </div>
                         </div>
-                        <!-- 今日表格清單摘要 -->
                         <div class="space-y-1 mt-4">
-                            <span class="text-[10px] text-slate-500 font-bold uppercase">今日進食流程 (增量同步)</span>
+                            <span class="text-[10px] text-slate-500 font-bold uppercase">今日進食列表 (自動存檔)</span>
                             <div id="meals-list" class="max-h-56 overflow-y-auto space-y-1 bg-slate-900/50 p-3 rounded-xl border border-slate-800">
-                                <div class="text-[10px] text-slate-600 italic text-center py-4">等待載入雲端數據...</div>
+                                <div class="text-[10px] text-slate-600 italic text-center py-4">請先連結帳號並同步</div>
                             </div>
                         </div>
-                        <div id="selected-contexts" class="space-y-1 mt-2"></div>
+                        <div id="selected-contexts" class="space-y-1"></div>
                     </div>
                 </section>
 
-                <!-- 本次攝取紀錄區 -->
+                <!-- 紀錄攝取 -->
                 <section class="glass-card p-6 border-emerald-500/20 bg-emerald-500/5">
-                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2"><i class="fas fa-utensils text-orange-400"></i> 紀錄本次進食</h2>
+                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2"><i class="fas fa-utensils text-orange-400"></i> 紀錄本次攝取</h2>
                     <div class="space-y-4">
                         <div class="border-2 border-dashed border-slate-700 rounded-xl p-4 text-center relative cursor-pointer hover:border-emerald-500/50 transition bg-slate-900/50">
-                            <input type="file" id="food-img" class="absolute inset-0 opacity-0 cursor-pointer z-10">
-                            <div id="upload-placeholder"><i class="fas fa-camera text-xl text-slate-500 mb-1"></i><p class="text-[10px] text-slate-400">拍照由 AI 辨識明細</p></div>
+                            <input type="file" id="food-img" class="absolute inset-0 opacity-0 cursor-pointer z-10" accept="image/*">
+                            <div id="upload-placeholder"><i class="fas fa-camera text-xl text-slate-500 mb-1"></i><p class="text-[10px] text-slate-400">拍照由 AI 自動分析</p></div>
                             <img id="preview-img" class="hidden w-full h-24 object-cover rounded-lg">
                         </div>
                         
-                        <div class="space-y-2">
-                            <div class="flex justify-between items-center">
-                                <label class="text-[10px] text-slate-500 font-bold uppercase">飲食描述 (文件/文字)</label>
-                                <div class="flex gap-2">
-                                    <button onclick="createPicker('history')" class="text-[9px] text-blue-400 hover:underline">雲端</button>
-                                    <button onclick="triggerLocalFile('history')" class="text-[9px] text-blue-400 hover:underline">本地</button>
-                                </div>
-                            </div>
-                            <textarea id="meal-text-input" rows="2" placeholder="貼上文字或選取檔案描述攝取內容..." class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-[11px] outline-none focus:border-emerald-500/50"></textarea>
-                        </div>
+                        <textarea id="meal-text-input" rows="2" placeholder="手動描述食物內容（例如：午餐吃了一碗雞肉飯）..." class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-[11px] outline-none focus:border-emerald-500/50"></textarea>
 
                         <button onclick="processIntake()" class="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-xs transition shadow-lg flex items-center justify-center gap-2">
-                            <i class="fas fa-cloud-upload-alt"></i> 分析並更新雲端紀錄
+                            <i class="fas fa-brain"></i> 分析並更新雲端紀錄
                         </button>
                     </div>
                 </section>
             </div>
 
-            <!-- 右側數據與建議區 -->
+            <!-- 數據區 -->
             <div class="lg:col-span-2 space-y-6">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div class="glass-card p-6 flex flex-col items-center">
-                        <h3 class="text-xs text-slate-400 mb-4 w-full uppercase tracking-wider text-center font-bold">今日剩餘熱量額度</h3>
+                        <h3 class="text-xs text-slate-400 mb-4 w-full uppercase text-center font-bold">今日剩餘熱量</h3>
                         <div class="relative w-48 h-48"><canvas id="calChart"></canvas>
-                        <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none"><span class="text-3xl font-bold" id="cal-remaining">0</span><span class="text-[10px] text-slate-500 uppercase">剩餘 kcal</span></div></div>
+                        <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none"><span class="text-3xl font-bold font-mono" id="cal-remaining">0</span><span class="text-[10px] text-slate-500 uppercase font-bold">kcal Left</span></div></div>
                     </div>
                     <div class="glass-card p-6 space-y-4">
-                        <h3 class="text-xs text-slate-400 uppercase tracking-wider font-bold">營養目標達成 (含脂肪)</h3>
+                        <h3 class="text-xs text-slate-400 uppercase font-bold text-center">目標達成率</h3>
                         <div class="space-y-4">
-                            <div><div class="flex justify-between text-[10px] mb-1 text-blue-300"><span>蛋白質</span><span id="pro-label">0/120g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div id="pro-bar" class="h-full bg-blue-500 transition-all duration-700"></div></div></div>
-                            <div><div class="flex justify-between text-[10px] mb-1 text-emerald-300"><span>碳水化合物</span><span id="carb-label">0/150g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div id="carb-bar" class="h-full bg-emerald-500 transition-all duration-700"></div></div></div>
-                            <div><div class="flex justify-between text-[10px] mb-1 text-orange-300"><span>脂肪</span><span id="fat-label">0/60g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div id="fat-bar" class="h-full bg-orange-500 transition-all duration-700"></div></div></div>
+                            <div><div class="flex justify-between text-[10px] mb-1 text-blue-300"><span>蛋白質 (Priority)</span><span id="pro-label">0/120g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full"><div id="pro-bar" class="h-full bg-blue-500 transition-all duration-700"></div></div></div>
+                            <div><div class="flex justify-between text-[10px] mb-1 text-emerald-300"><span>碳水化合物</span><span id="carb-label">0/150g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full"><div id="carb-bar" class="h-full bg-emerald-500 transition-all duration-700"></div></div></div>
+                            <div><div class="flex justify-between text-[10px] mb-1 text-orange-300"><span>脂肪</span><span id="fat-label">0/60g</span></div><div class="w-full bg-slate-800 h-1.5 rounded-full"><div id="fat-bar" class="h-full bg-orange-500 transition-all duration-700"></div></div></div>
                         </div>
                     </div>
                 </div>
-                <section class="glass-card p-6 min-h-[250px]">
-                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2 font-serif text-emerald-400"><i class="fas fa-brain"></i> AI 專家深度分析</h2>
+                <section class="glass-card p-6 min-h-[300px]">
+                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2 font-serif text-emerald-400 border-b border-slate-800 pb-2"><i class="fas fa-microchip"></i> AI 專家臨床分析紀錄</h2>
                     <div id="ai-content" class="text-[11px] text-slate-400 leading-relaxed italic">
-                        每次紀錄後，系統將自動整理進食流程並同步回您的 Google Drive (民國日期格式檔案)。
+                        等待數據輸入... 系統將分析飲食與 Mounjaro 對您代謝的影響。
                     </div>
                 </section>
             </div>
         </div>
     </div>
-    <!-- 載入中遮罩 -->
+
+    <!-- 遮罩 -->
     <div id="loading-overlay" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[100] hidden flex flex-col items-center justify-center">
         <div class="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-        <p id="loading-text" class="mt-4 text-emerald-400 text-xs font-medium"></p>
+        <p id="loading-text" class="mt-4 text-emerald-400 text-xs font-medium tracking-widest"></p>
     </div>
 </body>
 </html>
